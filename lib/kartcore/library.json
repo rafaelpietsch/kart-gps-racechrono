@@ -1,0 +1,9 @@
+{
+  "name": "kartcore",
+  "version": "1.0.0",
+  "description": "Session timing, button handling and the telemetry publishing pipeline",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": { "telemetry": "*", "rc_protocol": "*" }
+}
