@@ -1,0 +1,9 @@
+{
+  "name": "nmea",
+  "version": "1.0.0",
+  "description": "NMEA 0183 sentence assembly and fix parsing for u-blox receivers",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": { "telemetry": "*" }
+}
