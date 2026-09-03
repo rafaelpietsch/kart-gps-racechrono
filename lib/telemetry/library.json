@@ -1,0 +1,8 @@
+{
+  "name": "telemetry",
+  "version": "1.0.0",
+  "description": "Hardware independent domain types shared by the telemetry pipeline",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "rc_protocol",
+  "version": "1.0.0",
+  "description": "Encoders for the RaceChrono DIY BLE device API (service 0x1FF8)",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": { "telemetry": "*" }
+}
