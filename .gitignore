@@ -1,0 +1,26 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+!.vscode/extensions.json
+
+# Build output
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.a
+
+# Local overrides that must not reach the public repo
+platformio_local.ini
+.env
+
+# Editors and OS
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

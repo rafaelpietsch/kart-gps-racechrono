@@ -1,0 +1,6 @@
+[submodule "reference/bonogps"]
+	path = reference/bonogps
+	url = https://github.com/renatobo/bonogps.git
+[submodule "reference/racechrono-ble-diy-device"]
+	path = reference/racechrono-ble-diy-device
+	url = https://github.com/aollin/racechrono-ble-diy-device.git
