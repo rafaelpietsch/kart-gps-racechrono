@@ -1,0 +1,9 @@
+{
+  "name": "imu",
+  "version": "1.0.0",
+  "description": "MPU-6050 unit conversion, zeroing and mounting compensation",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": { "telemetry": "*" }
+}
