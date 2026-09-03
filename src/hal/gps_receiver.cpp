@@ -109,10 +109,10 @@ bool GpsReceiver::poll(uint32_t nowMs) {
       continue;
     }
     fixes_.consume(assembler_.sentence(), assembler_.length());
-    telemetry::GnssFix fix;
-    if (fixes_.takeCompletedFix(fix)) {
-      fix.receivedAtMs = nowMs;
-      fix_ = fix;
+    telemetry::GnssFix completedFix;
+    if (fixes_.takeCompletedFix(completedFix)) {
+      completedFix.receivedAtMs = nowMs;
+      fix_ = completedFix;
       ++fixCount_;
       completed = true;
     }

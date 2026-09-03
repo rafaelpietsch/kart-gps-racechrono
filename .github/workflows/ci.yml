@@ -86,7 +86,9 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
-      # Only the portable libraries are analysed: src/ pulls in the whole
-      # Arduino core, which drowns the report in third-party findings.
+      # --skip-packages keeps the Arduino core and NimBLE out of the report,
+      # which would otherwise bury our own findings in third-party ones.
+      # Low severity findings are advisory: cppcheck cannot see that Arduino
+      # calls setup() and loop(), or that NimBLE calls the callbacks.
       - name: Run cppcheck
         run: pio check -e native --skip-packages --fail-on-defect medium --fail-on-defect high
