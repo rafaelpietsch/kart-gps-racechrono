@@ -1,0 +1,9 @@
+{
+  "name": "ublox",
+  "version": "1.0.0",
+  "description": "UBX frame builder for u-blox 6 configuration",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": {}
+}
