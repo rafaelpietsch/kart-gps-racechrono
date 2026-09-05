@@ -213,4 +213,139 @@ void dumpMpuRegisters(TwoWire& wire, uint8_t address, Print& out,
   }
 }
 
+// --- GPS link ---------------------------------------------------------------
+
+namespace {
+
+/// Baud rates worth trying: the NEO-6M's factory default, the rate this
+/// firmware moves it to, and the one in between that clone modules often ship
+/// configured for.
+constexpr uint32_t kCandidateBauds[] = {9600, 38400, 115200};
+
+constexpr uint32_t kLineSampleMs = 300;
+constexpr uint32_t kBaudListenMs = 1200;
+
+} // namespace
+
+namespace {
+
+/// Samples one pin held down by an internal pull-down, reporting whether
+/// anything external overpowers it and how often it moves.
+struct LineState {
+  bool drivenHigh = false;
+  uint32_t transitions = 0;
+};
+
+LineState sampleLine(int pin, uint32_t forMs) {
+  LineState state;
+  state.drivenHigh = digitalRead(pin) == HIGH;
+  int last = digitalRead(pin);
+  const uint32_t deadline = millis() + forMs;
+  while (millis() < deadline) {
+    const int now = digitalRead(pin);
+    if (now != last) {
+      ++state.transitions;
+      last = now;
+    }
+  }
+  return state;
+}
+
+const char* describeLine(const LineState& state) {
+  if (state.transitions > 0) {
+    return "toggling, something is transmitting";
+  }
+  return state.drivenHigh ? "held HIGH, driven but idle" : "LOW, nothing is driving it";
+}
+
+} // namespace
+
+void probeGpsLines(HardwareSerial& uart, int rxPin, int txPin, Print& out) {
+  out.println("[gps ] testing both GPS pins as plain inputs");
+
+  uart.end();
+  pinMode(rxPin, INPUT_PULLDOWN);
+  pinMode(txPin, INPUT_PULLDOWN);
+  delay(20);
+
+  const LineState rx = sampleLine(rxPin, kLineSampleMs);
+  const LineState tx = sampleLine(txPin, kLineSampleMs);
+
+  out.printf("[gps ]   GPIO%d (our RX, expects the module TX): %s, %lu edges\n", rxPin,
+             describeLine(rx), static_cast<unsigned long>(rx.transitions));
+  out.printf("[gps ]   GPIO%d (our TX, expects the module RX): %s, %lu edges\n", txPin,
+             describeLine(tx), static_cast<unsigned long>(tx.transitions));
+
+  const bool rxAlive = rx.drivenHigh || rx.transitions > 0;
+  const bool txAlive = tx.drivenHigh || tx.transitions > 0;
+
+  if (!rxAlive && txAlive) {
+    out.println("[gps ] the module is driving the pin we transmit on, and nothing is "
+                "driving the pin we listen on. TX and RX are swapped: the module TX "
+                "belongs on our RX pin and its RX on our TX pin.");
+    return;
+  }
+  if (!rxAlive && !txAlive) {
+    out.println("[gps ] neither pin is driven by anything. A powered receiver holds its "
+                "TX high and would overpower the pull-down on whichever pin it reached, "
+                "so this is not a swap: the module has no 3V3, or its GND is not shared "
+                "with the board, or neither wire is landing on these pins.");
+    return;
+  }
+  if (rxAlive && rx.transitions == 0) {
+    out.println("[gps ] our RX pin is held high but never moves: the module is powered "
+                "and connected, yet silent. A NEO-6M sends sentences from power-up even "
+                "with no satellites, so this is a module configured mute, or a dead one.");
+    return;
+  }
+  out.println("[gps ] our RX pin is toggling, so the wiring and power are good. Whatever "
+              "is wrong is the rate or the framing.");
+}
+
+void probeGpsBaudRates(HardwareSerial& uart, int rxPin, int txPin, Print& out) {
+  out.println("[gps ] listening at each candidate baud rate");
+  out.println("[gps ] this blocks for a few seconds and will drop a live BLE session");
+
+  for (uint32_t baud : kCandidateBauds) {
+    uart.end();
+    delay(20);
+    uart.begin(baud, SERIAL_8N1, rxPin, txPin);
+    delay(20);
+    while (uart.available() > 0) {
+      uart.read();
+    }
+
+    uint32_t bytes = 0;
+    uint32_t dollars = 0;
+    uint32_t printable = 0;
+    const uint32_t deadline = millis() + kBaudListenMs;
+    while (millis() < deadline) {
+      while (uart.available() > 0) {
+        const int value = uart.read();
+        ++bytes;
+        if (value == '$') {
+          ++dollars;
+        }
+        if (value == '\n' || value == '\r' || (value >= 0x20 && value < 0x7F)) {
+          ++printable;
+        }
+      }
+    }
+
+    out.printf("[gps ]   %6lu baud: %lu bytes, %lu printable, %lu NMEA starts\n",
+               static_cast<unsigned long>(baud), static_cast<unsigned long>(bytes),
+               static_cast<unsigned long>(printable), static_cast<unsigned long>(dollars));
+
+    if (bytes > 0 && dollars > 0) {
+      out.println("[gps ]   ^ this is the rate the receiver is actually using");
+    } else if (bytes > 0 && printable * 4 < bytes * 3) {
+      out.println("[gps ]   ^ bytes arrive but most are not text: wrong rate, framing "
+                  "noise from a neighbouring rate");
+    }
+  }
+
+  out.println("[gps ] a row with bytes and NMEA starts is the receiver's real rate. All "
+              "rows empty means nothing is being transmitted at all.");
+}
+
 } // namespace diag

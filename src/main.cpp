@@ -72,6 +72,16 @@ bool imuPresent = false;
 uint32_t lastImuSampleMs = 0;
 constexpr uint32_t kImuPeriodMs = 1000 / KARTGPS_IMU_SAMPLE_HZ;
 
+hal::GpsReceiver::Config makeGpsConfig() {
+  hal::GpsReceiver::Config config;
+  config.rxPin = KARTGPS_PIN_GPS_RX;
+  config.txPin = KARTGPS_PIN_GPS_TX;
+  config.bootBaud = KARTGPS_GPS_BOOT_BAUD;
+  config.runBaud = KARTGPS_GPS_RUN_BAUD;
+  config.rateHz = KARTGPS_GPS_RATE_HZ;
+  return config;
+}
+
 hal::Mpu6050::Config makeImuConfig() {
   hal::Mpu6050::Config config;
   config.address = KARTGPS_MPU_ADDRESS;
@@ -441,6 +451,16 @@ void printCharacterization() {
                  "the part does not match the datasheet scale and no offset fixes that.");
 }
 
+void runGpsDiagnostics() {
+  Serial.println();
+  diag::probeGpsLines(gpsUart, KARTGPS_PIN_GPS_RX, KARTGPS_PIN_GPS_TX, Serial);
+  diag::probeGpsBaudRates(gpsUart, KARTGPS_PIN_GPS_RX, KARTGPS_PIN_GPS_TX, Serial);
+  // The sweep left the UART on the last rate it tried, so put the receiver
+  // back the way the application expects it.
+  Serial.println("[gps ] restoring the configured link");
+  gpsReceiver.begin(makeGpsConfig());
+}
+
 void printConsoleHelp() {
   Serial.println("\n--- kart-gps console ---");
   Serial.println("  s  status: what the LED means right now, plus every counter");
@@ -448,6 +468,7 @@ void printConsoleHelp() {
   Serial.println("  i  I2C bus lines, address scan and MPU-6050 register dump");
   Serial.println("  n  toggle the raw GPS UART echo");
   Serial.println("  c  six position accelerometer characterisation (start/report)");
+  Serial.println("  g  GPS link test: both pin levels, edge counts and a baud sweep");
   Serial.println("  z  re-run the zeroing (hold the board still)");
   Serial.println("  r  re-probe the MPU-6050 over I2C");
   Serial.println("  ?  this help");
@@ -507,6 +528,10 @@ void serviceConsole(uint32_t nowMs) {
           Serial.println("\n[cal ] capturing. Rest the board on each of its six faces "
                          "in turn, a couple of seconds each, then press 'c' to finish.");
         }
+        break;
+      case 'g':
+      case 'G':
+        runGpsDiagnostics();
         break;
       case 'z':
       case 'Z':
@@ -591,13 +616,7 @@ void setup() {
                 mpu.whoAmI(), imu::kWhoAmIValue);
   }
 
-  hal::GpsReceiver::Config gpsConfig;
-  gpsConfig.rxPin = KARTGPS_PIN_GPS_RX;
-  gpsConfig.txPin = KARTGPS_PIN_GPS_TX;
-  gpsConfig.bootBaud = KARTGPS_GPS_BOOT_BAUD;
-  gpsConfig.runBaud = KARTGPS_GPS_RUN_BAUD;
-  gpsConfig.rateHz = KARTGPS_GPS_RATE_HZ;
-  gpsReceiver.begin(gpsConfig);
+  gpsReceiver.begin(makeGpsConfig());
 #if KARTGPS_ENABLE_NMEA_ECHO
   gpsReceiver.setRawEcho(&Serial);
 #endif
