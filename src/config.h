@@ -61,6 +61,23 @@
 
 // --- IMU --------------------------------------------------------------------
 
+/// Per axis accelerometer zero offset in raw counts, subtracted from every
+/// burst before conversion. Zero disables the correction.
+///
+/// These belong to the individual sensor, not to the design: a part whose
+/// factory trim is off reads a fixed amount away from zero on every axis, which
+/// no amount of holding the kart still can remove. Measure them with the
+/// console 'c' command, which prints the flags to paste here.
+#ifndef KARTGPS_ACCEL_OFFSET_X
+#define KARTGPS_ACCEL_OFFSET_X 0
+#endif
+#ifndef KARTGPS_ACCEL_OFFSET_Y
+#define KARTGPS_ACCEL_OFFSET_Y 0
+#endif
+#ifndef KARTGPS_ACCEL_OFFSET_Z
+#define KARTGPS_ACCEL_OFFSET_Z 0
+#endif
+
 /// I2C address of the MPU-6050. The GY-521 ties AD0 low, giving 0x68; some
 /// breakouts tie it high instead, giving 0x69. The console 'i' command reports
 /// which address actually answers.

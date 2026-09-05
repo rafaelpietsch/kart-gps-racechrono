@@ -12,6 +12,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include "imu.h"
+
 namespace diag {
 
 /// Result of one sweep of the 7-bit address space.
@@ -39,7 +41,12 @@ bool readRegisters(TwoWire& wire, uint8_t address, uint8_t reg, uint8_t* buffer,
 
 /// Dumps the MPU-6050 configuration registers and one raw sample burst,
 /// decoded into g and dps so the numbers can be sanity checked by eye.
-void dumpMpuRegisters(TwoWire& wire, uint8_t address, Print& out);
+///
+/// The burst is read straight off the bus, so it does not pass through the
+/// driver and carries no trim correction. `trim` is therefore passed in and
+/// reported alongside: without it the dump contradicts a zeroing that has just
+/// succeeded, which is worse than saying nothing.
+void dumpMpuRegisters(TwoWire& wire, uint8_t address, Print& out, const imu::RawAccelBias& trim);
 
 /// Human readable name for a Wire::endTransmission() return code.
 const char* wireErrorName(uint8_t code);

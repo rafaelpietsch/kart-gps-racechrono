@@ -3,6 +3,7 @@
 #include "imu.h"
 
 #include <math.h>
+#include <stdint.h>
 
 namespace imu {
 namespace {
@@ -358,6 +359,103 @@ telemetry::ImuSample MotionProcessor::process(const telemetry::ImuSample& sample
     out.accelG[telemetry::kAxisZ] -= magnitude(bias_.gravityG);
   }
   return out;
+}
+
+void applyRawAccelBias(telemetry::ImuRawSample& sample, const RawAccelBias& bias) {
+  for (size_t i = 0; i < 3; ++i) {
+    int32_t corrected = static_cast<int32_t>(sample.accel[i]) - static_cast<int32_t>(bias.count[i]);
+    if (corrected > INT16_MAX) {
+      corrected = INT16_MAX;
+    } else if (corrected < INT16_MIN) {
+      corrected = INT16_MIN;
+    }
+    sample.accel[i] = static_cast<int16_t>(corrected);
+  }
+}
+
+// --- AccelCharacterizer -----------------------------------------------------
+
+void AccelCharacterizer::reset() {
+  seeded_ = false;
+  hasPrevious_ = false;
+  accepted_ = 0;
+  steadyRun_ = 0;
+  for (size_t i = 0; i < 3; ++i) {
+    previous_[i] = 0;
+    min_[i] = 0;
+    max_[i] = 0;
+  }
+}
+
+bool AccelCharacterizer::isSteady(const telemetry::ImuRawSample& raw) const {
+  for (size_t i = 0; i < 3; ++i) {
+    int32_t delta = static_cast<int32_t>(raw.accel[i]) - static_cast<int32_t>(previous_[i]);
+    if (delta < 0) {
+      delta = -delta;
+    }
+    if (delta > kStillDeltaCounts) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool AccelCharacterizer::addSample(const telemetry::ImuRawSample& raw) {
+  const bool steady = hasPrevious_ && isSteady(raw);
+  for (size_t i = 0; i < 3; ++i) {
+    previous_[i] = raw.accel[i];
+  }
+  hasPrevious_ = true;
+
+  if (!steady) {
+    steadyRun_ = 0;
+    return false;
+  }
+  if (steadyRun_ < kSettleSamples) {
+    ++steadyRun_;
+    return false;
+  }
+
+  for (size_t i = 0; i < 3; ++i) {
+    const int32_t value = raw.accel[i];
+    if (!seeded_) {
+      min_[i] = value;
+      max_[i] = value;
+      continue;
+    }
+    if (value < min_[i]) {
+      min_[i] = value;
+    }
+    if (value > max_[i]) {
+      max_[i] = value;
+    }
+  }
+  seeded_ = true;
+  ++accepted_;
+  return true;
+}
+
+AccelAxisFit AccelCharacterizer::axis(size_t index) const {
+  AccelAxisFit fit;
+  if (index >= 3 || !seeded_) {
+    return fit;
+  }
+  fit.minCount = min_[index];
+  fit.maxCount = max_[index];
+  const int32_t span = max_[index] - min_[index];
+  fit.complete = span >= kMinSpanCounts;
+  fit.offsetCount = static_cast<float>(max_[index] + min_[index]) * 0.5f;
+  fit.sensitivityLsbPerG = static_cast<float>(span) * 0.5f;
+  return fit;
+}
+
+bool AccelCharacterizer::isComplete() const {
+  for (size_t i = 0; i < 3; ++i) {
+    if (!axis(i).complete) {
+      return false;
+    }
+  }
+  return true;
 }
 
 } // namespace imu

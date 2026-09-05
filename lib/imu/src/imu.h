@@ -172,6 +172,109 @@ private:
   SensorBias bias_;
 };
 
+// --- Factory trim correction ------------------------------------------------
+
+/// Per axis accelerometer zero offset, in raw counts.
+///
+/// This is a property of the individual part rather than of a session. A badly
+/// trimmed accelerometer reads a fixed amount away from zero on every axis, and
+/// no single-attitude zeroing can separate that from gravity: tilt the device
+/// and the offset stays put while gravity moves, so one reading has two
+/// unknowns. It has to be measured across opposite faces (see
+/// AccelCharacterizer) and then subtracted before anything else looks at the
+/// sample.
+///
+/// Correcting it early matters. Downstream, BiasCalibrator checks that a
+/// stationary device reads about 1 g and rejects the capture when it does not;
+/// with the trim error still in the signal that check fires on a part whose
+/// scale is perfectly good.
+struct RawAccelBias {
+  int16_t count[3] = {0, 0, 0};
+
+  bool isZero() const { return count[0] == 0 && count[1] == 0 && count[2] == 0; }
+};
+
+/// Subtracts `bias` from the accelerometer axes of a raw burst, saturating
+/// rather than wrapping so a large offset near full scale cannot turn a pegged
+/// positive reading into a negative one.
+void applyRawAccelBias(telemetry::ImuRawSample& sample, const RawAccelBias& bias);
+
+// --- Characterisation -------------------------------------------------------
+
+/// What one axis looked like across a six position capture.
+struct AccelAxisFit {
+  int32_t minCount = 0;
+  int32_t maxCount = 0;
+  /// True once the axis has swung far enough for its extremes to be two
+  /// opposite faces rather than noise around a single attitude.
+  bool complete = false;
+  /// Midpoint of the extremes: what the axis reads at zero g.
+  float offsetCount = 0.0f;
+  /// Half the span: counts per g, to be compared against the datasheet value
+  /// for the configured range.
+  float sensitivityLsbPerG = 0.0f;
+};
+
+/// Six position accelerometer characterisation.
+///
+/// Resting the device on each of its six faces drives every axis to +1 g and
+/// -1 g in turn, so the extremes of each axis carry both halves of the answer:
+/// their midpoint is the zero offset, and half their span is the sensitivity.
+/// Gravity is the only reference needed, and the faces can be visited in any
+/// order.
+///
+/// This is the measurement to reach for when a stationary device does not read
+/// 1 g. A pure sensitivity error keeps |a| constant as the device is tilted; an
+/// offset does not. Solving for both at once tells the two apart instead of
+/// guessing, and the numbers it produces are what a correction would use.
+class AccelCharacterizer {
+public:
+  /// Minimum span, in counts, before an axis counts as characterised. A full
+  /// swing is around 16000 counts at the MPU-6050's nominal +/-4 g, and this
+  /// stays well clear of that while rejecting a single resting attitude.
+  static constexpr int32_t kMinSpanCounts = 4000;
+
+  /// Per axis change between consecutive samples, in counts, below which the
+  /// device is treated as resting. Comfortably above the noise of a board
+  /// sitting on a bench, and below anything a hand does: a swing overshoots
+  /// past 1 g, and letting its turnaround through would inflate the span and
+  /// overstate the sensitivity.
+  static constexpr int32_t kStillDeltaCounts = 100;
+
+  /// Consecutive steady samples required before the extremes are trusted, so
+  /// the reading has settled rather than being caught on the way down.
+  static constexpr uint16_t kSettleSamples = 20;
+
+  void reset();
+
+  /// Feeds one raw burst, and returns true when it was used.
+  ///
+  /// Stillness is judged from the accelerometer's own steadiness rather than
+  /// from the gyroscope: a part with a large rate bias never reads zero at
+  /// rest, so gating on gyro magnitude would reject every sample. An extreme
+  /// captured mid-swing is not a face of the box and would inflate the span.
+  bool addSample(const telemetry::ImuRawSample& raw);
+
+  /// True once all three axes have seen both of their extremes.
+  bool isComplete() const;
+
+  uint32_t acceptedSamples() const { return accepted_; }
+
+  /// Per axis result. `index` is 0, 1 or 2 for X, Y and Z.
+  AccelAxisFit axis(size_t index) const;
+
+private:
+  bool isSteady(const telemetry::ImuRawSample& raw) const;
+
+  bool seeded_ = false;
+  bool hasPrevious_ = false;
+  uint32_t accepted_ = 0;
+  uint16_t steadyRun_ = 0;
+  int16_t previous_[3] = {0, 0, 0};
+  int32_t min_[3] = {0, 0, 0};
+  int32_t max_[3] = {0, 0, 0};
+};
+
 /// Applies a captured bias and the mounting rotation to live samples.
 class MotionProcessor {
 public:

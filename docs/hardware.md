@@ -157,6 +157,7 @@ Open the monitor and press a key:
 | `b` | Replays the boot report, including the raw WHO_AM_I read |
 | `i` | I2C: idle line levels, an address scan, and an MPU-6050 register dump |
 | `n` | Toggles a raw echo of the GPS UART |
+| `c` | Six position accelerometer characterisation (start, then report) |
 | `z` | Re-runs the zeroing |
 | `r` | Re-probes the MPU-6050 without a reboot |
 | `?` | Help |
@@ -205,6 +206,34 @@ compensate for either:
 
 The boot log names the identity whenever it is not 0x68, so this is visible
 rather than silent.
+
+### When a stationary device does not read 1 g
+
+At rest an accelerometer measures gravity and nothing else, so the magnitude of
+the three axes has to come to 1 g whatever the tilt. A stationary reading that
+does not is a fault in the part, not in the mounting, and the zeroing rejects it
+rather than logging laps against a calibration it cannot trust.
+
+Do not widen `BiasCalibrator`'s 0.85 to 1.15 g window to make the rejection go
+away. That window is the only thing standing between a bad sensor and a session
+of quietly wrong data.
+
+Two faults produce it, and they are told apart by tilting the board:
+
+- **A sensitivity error** scales every axis equally, so the magnitude stays
+  constant as the device is tilted, just at the wrong value.
+- **A bias** adds a fixed vector, so the magnitude *changes* with attitude.
+
+`c` measures both. Start it, then rest the board on each of its six faces for a
+couple of seconds each; every axis is driven to +1 g and -1 g in turn. Press `c`
+again for the report. Per axis, the midpoint of the two extremes is the zero
+offset and half their span is the true sensitivity in counts per g, which the
+report states as a percentage of the datasheet value for the configured range.
+
+Samples are only taken while the reading is steady, judged from the
+accelerometer itself rather than from the gyroscope: a part with a large rate
+bias never reads zero at rest, so gating on gyro magnitude would reject
+everything.
 
 ### Reading a raw UART echo
 

@@ -8,7 +8,7 @@ RaceChrono's DIY device API so the phone logs them like any commercial receiver.
 Built for kart track days, where the corners are short, the kerbs are violent and
 a commercial logger costs more than a set of tyres.
 
-![status](https://img.shields.io/badge/tests-130%20passing-brightgreen)
+![status](https://img.shields.io/badge/tests-138%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![platform](https://img.shields.io/badge/platform-ESP32--C3-orange)
 
@@ -97,7 +97,7 @@ independent and runs on the host:
 pio test -e native
 ```
 
-130 test cases across six suites. Two of them are worth calling out:
+138 test cases across six suites. Two of them are worth calling out:
 
 - `test_rc_protocol` checks the 20-byte GPS packet against a golden vector
   worked out by hand from the RaceChrono specification, so a layout or
