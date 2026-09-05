@@ -12,6 +12,7 @@
 #include "button.h"
 #include "channels.h"
 #include "config.h"
+#include "diagnostics.h"
 #include "hal/ble_server.h"
 #include "hal/gps_receiver.h"
 #include "hal/mpu6050.h"
@@ -55,6 +56,25 @@ kart::ButtonDebouncer setButton;
 bool imuPresent = false;
 uint32_t lastImuSampleMs = 0;
 constexpr uint32_t kImuPeriodMs = 1000 / KARTGPS_IMU_SAMPLE_HZ;
+
+hal::Mpu6050::Config makeImuConfig() {
+  hal::Mpu6050::Config config;
+  config.address = KARTGPS_MPU_ADDRESS;
+  config.sampleRateHz = KARTGPS_IMU_SAMPLE_HZ;
+  return config;
+}
+
+/// What the start-up probe found. The USB CDC on this board discards anything
+/// printed before the host opens the port, so the boot log is routinely lost;
+/// keeping the result lets the console reprint it on demand.
+struct BootReport {
+  bool imuPresent = false;
+  bool whoAmIRead = false;
+  uint8_t whoAmI = 0;
+  uint8_t probeError = 0;
+};
+
+BootReport bootReport;
 
 // --- Status LED -------------------------------------------------------------
 
@@ -204,6 +224,212 @@ void serviceGps(uint32_t nowMs) {
   }
 }
 
+const char* calibratorStateName() {
+  switch (calibrator.state()) {
+    case imu::BiasCalibrator::State::kIdle:
+      return "idle";
+    case imu::BiasCalibrator::State::kRunning:
+      return "running";
+    case imu::BiasCalibrator::State::kComplete:
+      return "complete";
+    case imu::BiasCalibrator::State::kRejected:
+      return "REJECTED";
+  }
+  return "unknown";
+}
+
+// --- Console ----------------------------------------------------------------
+//
+// One key per command on the USB serial port. This exists because the two
+// buses that matter are internal wires: without a logic analyser the only way
+// to see the I2C traffic and the GPS UART is to ask the firmware what it sees.
+
+#if KARTGPS_ENABLE_CONSOLE
+
+const char* ledPatternName(LedPattern pattern) {
+  switch (pattern) {
+    case LedPattern::kSearching:
+      return "searching (one wink a second): advertising, no phone connected";
+    case LedPattern::kConnected:
+      return "connected (even blink): phone attached, no usable GNSS fix";
+    case LedPattern::kReady:
+      return "ready (solid): connected and logging";
+    case LedPattern::kCalibrating:
+      return "calibrating (fast flicker): the zeroing window is open";
+    case LedPattern::kFault:
+      return "FAULT (two quick flashes, then a pause)";
+  }
+  return "unknown";
+}
+
+void printBootReport() {
+  Serial.println("[boot] kart-gps, replayed start-up probe");
+  if (bootReport.whoAmIRead) {
+    Serial.printf("[boot] WHO_AM_I at 0x%02X read back 0x%02X (expected 0x%02X)\n",
+                  KARTGPS_MPU_ADDRESS, bootReport.whoAmI, imu::kWhoAmIValue);
+  } else {
+    Serial.printf("[boot] WHO_AM_I at 0x%02X did not answer: %s\n", KARTGPS_MPU_ADDRESS,
+                  diag::wireErrorName(bootReport.probeError));
+  }
+  Serial.printf("[boot] MPU-6050 %s\n", bootReport.imuPresent ? "ready" : "NOT FOUND");
+  Serial.printf("[boot] GPS configured for %d Hz at %lu baud on RX=GPIO%d TX=GPIO%d\n",
+                KARTGPS_GPS_RATE_HZ, static_cast<unsigned long>(KARTGPS_GPS_RUN_BAUD),
+                KARTGPS_PIN_GPS_RX, KARTGPS_PIN_GPS_TX);
+  Serial.printf("[boot] BLE advertising as %s\n", KARTGPS_BLE_DEVICE_NAME);
+}
+
+void printStatus(uint32_t nowMs) {
+  const LedPattern pattern = currentPattern(nowMs);
+  Serial.printf("\n--- status at %lu ms ---\n", static_cast<unsigned long>(nowMs));
+  Serial.printf("[led ] %s\n", ledPatternName(pattern));
+  if (pattern == LedPattern::kFault) {
+    // The two-flash pattern has exactly two causes and they need different
+    // fixes, so name the one that is actually firing.
+    if (!imuPresent) {
+      Serial.println("[led ] cause: the MPU-6050 did not answer on I2C. Press 'i' for a scan.");
+    } else {
+      Serial.println("[led ] cause: the last zeroing was rejected; the sensor itself "
+                     "is fine. Hold the board still and press 'z'.");
+    }
+  }
+
+  Serial.printf("[imu ] present=%s i2cErrors=%lu calibrator=%s (%u/%u) biasApplied=%s\n",
+                imuPresent ? "yes" : "NO", static_cast<unsigned long>(mpu.errorCount()),
+                calibratorStateName(), static_cast<unsigned>(calibrator.collected()),
+                static_cast<unsigned>(calibrator.required()),
+                motionProcessor.isCalibrated() ? "yes" : "no");
+
+  const nmea::SentenceAssembler::Stats& sentences = gpsReceiver.sentenceStats();
+  const uint32_t lastByteMs = gpsReceiver.lastByteMs();
+  Serial.printf("[gps ] rxBytes=%lu sentences=%lu checksumErr=%lu overflow=%lu fixes=%lu\n",
+                static_cast<unsigned long>(gpsReceiver.rxByteCount()),
+                static_cast<unsigned long>(sentences.accepted),
+                static_cast<unsigned long>(sentences.checksumErrors),
+                static_cast<unsigned long>(sentences.overflows),
+                static_cast<unsigned long>(gpsReceiver.fixCount()));
+  if (lastByteMs == 0) {
+    Serial.printf("[gps ] not one byte has arrived since boot. That is a wiring or "
+                  "power fault, not a parsing one: check that the module TX reaches "
+                  "GPIO%d and that the module has 3V3.\n",
+                  KARTGPS_PIN_GPS_RX);
+  } else {
+    Serial.printf("[gps ] last byte %lu ms ago\n", static_cast<unsigned long>(nowMs - lastByteMs));
+    if (sentences.accepted == 0) {
+      Serial.println("[gps ] bytes arrive but no sentence validates. Press 'n' to watch "
+                     "the raw stream: hex rather than text means the baud rate is wrong.");
+    }
+  }
+
+  const telemetry::GnssFix& partial = gpsReceiver.partialFix();
+  Serial.printf("[gps ] partial fix: quality=%u satellites=%u position=%s\n",
+                static_cast<unsigned>(partial.fixQuality),
+                static_cast<unsigned>(partial.satellites),
+                partial.positionValid ? "valid" : "none");
+
+  const kart::TelemetryPipeline::Stats& stats = pipeline.stats();
+  Serial.printf("[ble ] connected=%s sent gps=%lu motion=%lu status=%lu\n",
+                bleServer.isConnected() ? "yes" : "no",
+                static_cast<unsigned long>(stats.gpsMainSent),
+                static_cast<unsigned long>(stats.motionSent),
+                static_cast<unsigned long>(stats.statusSent));
+  Serial.printf("[ble ] dropped: disconnected=%lu byFilter=%lu byRate=%lu transportErr=%lu\n",
+                static_cast<unsigned long>(stats.droppedDisconnected),
+                static_cast<unsigned long>(stats.droppedByFilter),
+                static_cast<unsigned long>(stats.droppedByRate),
+                static_cast<unsigned long>(stats.transportErrors));
+  if (!bleServer.isConnected()) {
+    Serial.println("[ble ] the three sent counters only move while a phone is "
+                   "connected, so zeros here are expected on the bench.");
+  }
+  Serial.printf("[sys ] heap=%lu nmeaEcho=%s\n", static_cast<unsigned long>(ESP.getFreeHeap()),
+                gpsReceiver.isEchoing() ? "on" : "off");
+}
+
+void runI2cDiagnostics() {
+  Serial.println();
+  diag::reportBusLines(KARTGPS_PIN_I2C_SDA, KARTGPS_PIN_I2C_SCL, Serial);
+  const diag::I2cScanResult scan = diag::scanI2c(Wire, Serial);
+  for (uint8_t i = 0; i < scan.foundCount; ++i) {
+    if (scan.found[i] == imu::kI2cAddressLow || scan.found[i] == imu::kI2cAddressHigh) {
+      diag::dumpMpuRegisters(Wire, scan.found[i], Serial);
+    }
+  }
+  if (scan.foundCount == 0) {
+    // Dump anyway: the per-register error codes from a silent address say more
+    // than the scan summary does.
+    diag::dumpMpuRegisters(Wire, KARTGPS_MPU_ADDRESS, Serial);
+  }
+}
+
+void retryImu(uint32_t nowMs) {
+  Serial.println("[imu ] re-probing");
+  imuPresent = mpu.begin(makeImuConfig());
+  bootReport.imuPresent = imuPresent;
+  Serial.printf("[imu ] %s\n", imuPresent ? "MPU-6050 ready" : "still not answering");
+  if (imuPresent) {
+    pipeline.resetSession(nowMs);
+    startCalibration();
+  }
+}
+
+void printConsoleHelp() {
+  Serial.println("\n--- kart-gps console ---");
+  Serial.println("  s  status: what the LED means right now, plus every counter");
+  Serial.println("  b  replay the boot report (lost when the monitor attaches late)");
+  Serial.println("  i  I2C bus lines, address scan and MPU-6050 register dump");
+  Serial.println("  n  toggle the raw GPS UART echo");
+  Serial.println("  z  re-run the zeroing (hold the board still)");
+  Serial.println("  r  re-probe the MPU-6050 over I2C");
+  Serial.println("  ?  this help");
+}
+
+void serviceConsole(uint32_t nowMs) {
+  while (Serial.available() > 0) {
+    switch (Serial.read()) {
+      case 's':
+      case 'S':
+        printStatus(nowMs);
+        break;
+      case 'b':
+      case 'B':
+        printBootReport();
+        break;
+      case 'i':
+      case 'I':
+        runI2cDiagnostics();
+        break;
+      case 'n':
+      case 'N':
+        if (gpsReceiver.isEchoing()) {
+          gpsReceiver.setRawEcho(nullptr);
+          Serial.println("\n[gps ] raw echo off");
+        } else {
+          Serial.println("\n[gps ] raw echo on: printable bytes as text, the rest as <XX>");
+          gpsReceiver.setRawEcho(&Serial);
+        }
+        break;
+      case 'z':
+      case 'Z':
+        Serial.println("\n[imu ] zeroing, hold still");
+        startCalibration();
+        break;
+      case 'r':
+      case 'R':
+        retryImu(nowMs);
+        break;
+      case '?':
+      case 'h':
+      case 'H':
+        printConsoleHelp();
+        break;
+      default:
+        break; // newlines and stray bytes from the terminal
+    }
+  }
+}
+
+#endif // KARTGPS_ENABLE_CONSOLE
+
 #if KARTGPS_LOG_LEVEL > 1
 void logHeartbeat(uint32_t nowMs) {
   static uint32_t lastLogMs = 0;
@@ -212,12 +438,20 @@ void logHeartbeat(uint32_t nowMs) {
   }
   lastLogMs = nowMs;
   const kart::TelemetryPipeline::Stats& stats = pipeline.stats();
-  KARTGPS_LOG("[stat] fixes=%lu gps=%lu motion=%lu status=%lu nmeaErr=%lu heap=%lu",
+  // The counters that say *why* something is wrong come first. The three send
+  // counters only move while a phone is connected, so on the bench they read
+  // zero however healthy the device is, and leading with them misleads.
+  KARTGPS_LOG("[stat] imu=%s cal=%s rxBytes=%lu nmea=%lu nmeaErr=%lu fixes=%lu ble=%s "
+              "gps=%lu motion=%lu status=%lu heap=%lu",
+              imuPresent ? "ok" : "MISSING", calibratorStateName(),
+              static_cast<unsigned long>(gpsReceiver.rxByteCount()),
+              static_cast<unsigned long>(gpsReceiver.sentenceStats().accepted),
+              static_cast<unsigned long>(gpsReceiver.sentenceStats().checksumErrors),
               static_cast<unsigned long>(gpsReceiver.fixCount()),
+              bleServer.isConnected() ? "up" : "down",
               static_cast<unsigned long>(stats.gpsMainSent),
               static_cast<unsigned long>(stats.motionSent),
               static_cast<unsigned long>(stats.statusSent),
-              static_cast<unsigned long>(gpsReceiver.sentenceStats().checksumErrors),
               static_cast<unsigned long>(ESP.getFreeHeap()));
 }
 #endif
@@ -242,9 +476,12 @@ void setup() {
 
   Wire.begin(KARTGPS_PIN_I2C_SDA, KARTGPS_PIN_I2C_SCL, 400000);
 
-  hal::Mpu6050::Config imuConfig;
-  imuConfig.sampleRateHz = KARTGPS_IMU_SAMPLE_HZ;
-  imuPresent = mpu.begin(imuConfig);
+  // Probe WHO_AM_I before the driver does, so the console can say later
+  // whether the sensor was silent or answered with the wrong identity.
+  bootReport.whoAmIRead = diag::readRegisters(Wire, KARTGPS_MPU_ADDRESS, imu::reg::kWhoAmI,
+                                              &bootReport.whoAmI, 1, bootReport.probeError);
+  imuPresent = mpu.begin(makeImuConfig());
+  bootReport.imuPresent = imuPresent;
   KARTGPS_LOG("[imu] %s", imuPresent ? "MPU-6050 ready" : "MPU-6050 NOT FOUND, check wiring");
 
   hal::GpsReceiver::Config gpsConfig;
@@ -254,6 +491,9 @@ void setup() {
   gpsConfig.runBaud = KARTGPS_GPS_RUN_BAUD;
   gpsConfig.rateHz = KARTGPS_GPS_RATE_HZ;
   gpsReceiver.begin(gpsConfig);
+#if KARTGPS_ENABLE_NMEA_ECHO
+  gpsReceiver.setRawEcho(&Serial);
+#endif
   KARTGPS_LOG("[gps] configured for %d Hz at %lu baud", KARTGPS_GPS_RATE_HZ,
               static_cast<unsigned long>(KARTGPS_GPS_RUN_BAUD));
 
@@ -274,6 +514,10 @@ void setup() {
   // The device is almost always sitting still on the bench at power-up, so
   // take a zero straight away; the driver only has to press SET if it is not.
   startCalibration();
+
+#if KARTGPS_ENABLE_CONSOLE
+  KARTGPS_LOG("[boot] press ? on the serial console for diagnostics");
+#endif
 }
 
 void loop() {
@@ -285,6 +529,9 @@ void loop() {
   serviceButton(now);
   pipeline.tick(now);
   updateStatusLed(currentPattern(now), now);
+#if KARTGPS_ENABLE_CONSOLE
+  serviceConsole(now);
+#endif
 #if KARTGPS_LOG_LEVEL > 1
   logHeartbeat(now);
 #endif

@@ -21,6 +21,17 @@ constexpr size_t kRxBufferSize = 1024;
 
 } // namespace
 
+void GpsReceiver::echoByte(char byte) {
+  // Printable ASCII and the line endings go through untouched so NMEA reads as
+  // NMEA; anything else becomes hex, which is what a wrong baud rate looks like.
+  const bool isLineEnding = byte == '\n' || byte == '\r';
+  if (isLineEnding || (byte >= 0x20 && byte < 0x7F)) {
+    echo_->write(byte);
+    return;
+  }
+  echo_->printf("<%02X>", static_cast<uint8_t>(byte));
+}
+
 void GpsReceiver::sendUbx(const uint8_t* frame, size_t length) {
   if (length == 0) {
     return;
@@ -105,7 +116,13 @@ bool GpsReceiver::poll(uint32_t nowMs) {
   // Bound the work per call so a backlog cannot starve the IMU and BLE.
   int budget = 512;
   while (uart_.available() > 0 && budget-- > 0) {
-    if (!assembler_.push(static_cast<char>(uart_.read()))) {
+    const char byte = static_cast<char>(uart_.read());
+    ++rxByteCount_;
+    lastByteMs_ = nowMs;
+    if (echo_ != nullptr) {
+      echoByte(byte);
+    }
+    if (!assembler_.push(byte)) {
       continue;
     }
     fixes_.consume(assembler_.sentence(), assembler_.length());

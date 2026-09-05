@@ -136,3 +136,53 @@ firmware takes one automatically at boot.
 | Short wink once a second | Advertising, nothing connected |
 | 10 Hz flicker | Zeroing in progress, hold still |
 | Two quick flashes, pause | Zeroing was rejected, or the MPU-6050 did not answer |
+
+The two-flash pattern covers two faults that need opposite fixes, so do not
+guess between them: open the serial console and press `s`, which names the one
+that is actually firing.
+
+## Serial console
+
+The board speaks over its native USB CDC, and that port throws away everything
+written before a host opens it. `pio device monitor` almost always attaches
+after `setup()` has run, so the boot log — the one place that says whether the
+MPU-6050 answered — is routinely lost. Resetting the board with the monitor
+already open brings it back, and so does the console.
+
+Open the monitor and press a key:
+
+| Key | What it does |
+| --- | --- |
+| `s` | Status: what the LED means right now, and every counter behind it |
+| `b` | Replays the boot report, including the raw WHO_AM_I read |
+| `i` | I2C: idle line levels, an address scan, and an MPU-6050 register dump |
+| `n` | Toggles a raw echo of the GPS UART |
+| `z` | Re-runs the zeroing |
+| `r` | Re-probes the MPU-6050 without a reboot |
+| `?` | Help |
+
+### Reading an I2C scan
+
+`i` separates the three faults that all look like "the sensor is missing":
+
+- **A line reads LOW when idle.** No pull-up, a short to ground, or a device
+  holding the bus. Nothing will be found until that clears. The GY-521 carries
+  its own pull-ups, so this usually means SDA and SCL are swapped with
+  something else, or the module has no 3V3.
+- **Every address NACKs cleanly, none found.** The bus works electrically but
+  nothing is answering: check power to the module first, then the SDA/SCL pair.
+- **A device answers, but at 0x69.** AD0 is tied high on that breakout. Build
+  with `-DKARTGPS_MPU_ADDRESS=0x69`, or ground AD0.
+
+### Reading a raw UART echo
+
+`n` mirrors every byte the GPS sends, printable characters as themselves and
+everything else as `<XX>`. That distinction is the whole point:
+
+- **Nothing at all**, and `rxBytes` stays at zero: the receiver is not talking.
+  A wiring or power fault, not a parsing one.
+- **Legible `$GPRMC,...` lines**: the link is fine, and any missing fix is the
+  receiver still searching for satellites.
+- **Mostly `<XX>` hex**: bytes arrive at the wrong baud rate. The receiver
+  ignored the `CFG-PRT` that moves it to 115200, which a clone module with a
+  non-default port configuration will do.

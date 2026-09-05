@@ -82,6 +82,12 @@ The debug environment adds verbose logging and echoes raw NMEA:
 pio run -e esp32c3_supermini_debug -t upload
 ```
 
+Both builds carry a one-key serial console: press `?` in the monitor for a bus
+scan, a register dump, a raw UART echo and a decode of whatever the status LED
+is doing. It is the first thing to reach for when the LED shows a fault, and it
+exists because the boot log is lost whenever the monitor attaches late. See
+[docs/hardware.md](docs/hardware.md#serial-console).
+
 ## Tests
 
 The signal processing, protocol encoding and scheduling logic is hardware
