@@ -51,11 +51,13 @@ bool Mpu6050::readRegisters(uint8_t reg, uint8_t* buffer, size_t length) {
 bool Mpu6050::begin(const Config& config) {
   config_ = config;
 
+  whoAmI_ = 0;
   uint8_t whoAmI = 0;
   if (!readRegisters(imu::reg::kWhoAmI, &whoAmI, 1)) {
     return false;
   }
-  if (whoAmI != imu::kWhoAmIValue) {
+  whoAmI_ = whoAmI;
+  if (!imu::isCompatibleWhoAmI(whoAmI)) {
     return false;
   }
 

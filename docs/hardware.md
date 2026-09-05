@@ -174,6 +174,38 @@ Open the monitor and press a key:
 - **A device answers, but at 0x69.** AD0 is tied high on that breakout. Build
   with `-DKARTGPS_MPU_ADDRESS=0x69`, or ground AD0.
 
+### When WHO_AM_I is not 0x68
+
+A module that answers at 0x68 but reports a different identity is not a genuine
+MPU-6050. Boards sold as GY-521 carry substituted parts often enough that the
+driver accepts the whole compatible family rather than refusing them: the
+MPU-6500 and MPU-9250 and the unbranded clones share the register map this
+firmware drives, including the accelerometer and gyroscope scale factors, which
+is what the telemetry actually depends on.
+
+The check is not simply dropped. An identity outside that family still fails,
+because it usually means the read landed on some other device. And a part that
+is accepted but scales differently is caught downstream anyway: the zeroing
+rejects a stationary capture that does not read close to 1 g, so the fault LED
+comes on rather than a lap being logged against a wrong calibration.
+
+Two things do change on a substituted part, and the firmware does not currently
+compensate for either:
+
+- **Temperature is reported wrong.** The conversion is the MPU-6050's
+  `raw / 340 + 36.53`. The 6500 family uses a different curve, so the status
+  channel's device temperature drifts by several degrees. Nothing else reads
+  that channel, so this is cosmetic.
+- **The accelerometer is not filtered at 44 Hz.** On the MPU-6050 the `CONFIG`
+  register's DLPF applies to both sensors. On the 6500 family it applies to the
+  gyroscope only; the accelerometer filter lives in `ACCEL_CONFIG_2` (0x1D),
+  which this firmware never writes, leaving the accelerometer wider band than
+  intended. Engine vibration that the 44 Hz setting was chosen to keep out can
+  alias into the sampled band.
+
+The boot log names the identity whenever it is not 0x68, so this is visible
+rather than silent.
+
 ### Reading a raw UART echo
 
 `n` mirrors every byte the GPS sends, printable characters as themselves and

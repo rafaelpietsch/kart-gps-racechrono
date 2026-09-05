@@ -20,6 +20,21 @@ float magnitude(const float v[3]) {
 
 } // namespace
 
+bool isCompatibleWhoAmI(uint8_t value) {
+  switch (value) {
+    case 0x68: // MPU-6050
+    case 0x70: // MPU-6500
+    case 0x71: // MPU-9250
+    case 0x72: // reported by several MPU-6050 and MPU-9250 clone modules
+    case 0x73: // MPU-9255
+    case 0x74:
+    case 0x75:
+      return true;
+    default:
+      return false;
+  }
+}
+
 float accelScaleLsbPerG(AccelRange range) {
   switch (range) {
     case AccelRange::k2G:

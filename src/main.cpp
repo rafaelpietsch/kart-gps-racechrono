@@ -482,7 +482,14 @@ void setup() {
                                               &bootReport.whoAmI, 1, bootReport.probeError);
   imuPresent = mpu.begin(makeImuConfig());
   bootReport.imuPresent = imuPresent;
-  KARTGPS_LOG("[imu] %s", imuPresent ? "MPU-6050 ready" : "MPU-6050 NOT FOUND, check wiring");
+  KARTGPS_LOG("[imu] %s", imuPresent ? "sensor ready" : "sensor NOT FOUND, check wiring");
+  if (imuPresent && mpu.whoAmI() != imu::kWhoAmIValue) {
+    // Worth saying out loud: the part is compatible enough to drive, but it is
+    // not the one the temperature curve and the accel filter were tuned for.
+    KARTGPS_LOG("[imu] WHO_AM_I is 0x%02X, not the MPU-6050's 0x%02X: this is a "
+                "substituted part, see docs/hardware.md",
+                mpu.whoAmI(), imu::kWhoAmIValue);
+  }
 
   hal::GpsReceiver::Config gpsConfig;
   gpsConfig.rxPin = KARTGPS_PIN_GPS_RX;

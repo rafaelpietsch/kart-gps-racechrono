@@ -27,7 +27,22 @@ namespace imu {
 
 constexpr uint8_t kI2cAddressLow = 0x68;  ///< AD0 tied low (GY-521 default)
 constexpr uint8_t kI2cAddressHigh = 0x69; ///< AD0 tied high
-constexpr uint8_t kWhoAmIValue = 0x68;
+constexpr uint8_t kWhoAmIValue = 0x68;    ///< What a genuine MPU-6050 reports
+
+/// True for WHO_AM_I identities this driver can drive.
+///
+/// Boards sold as GY-521 modules do not all carry a genuine MPU-6050. The
+/// parts that turn up in their place -- the MPU-6500 and MPU-9250 family, and
+/// the unbranded clones that report neither -- share the register map this
+/// firmware uses: the same PWR_MGMT_1, the same SMPLRT_DIV and CONFIG, the
+/// same 14 byte burst at 0x3B, and crucially the same accelerometer and
+/// gyroscope scale factors. Refusing to talk to them buys nothing.
+///
+/// The check is kept rather than dropped because it still catches a read that
+/// landed on some other device entirely. A part that is accepted here but
+/// scales differently is caught downstream anyway: BiasCalibrator rejects a
+/// stationary capture that does not read close to 1 g.
+bool isCompatibleWhoAmI(uint8_t value);
 
 namespace reg {
 constexpr uint8_t kSampleRateDivider = 0x19;
