@@ -56,6 +56,31 @@ void test_gyroscope_scale_factors(void) {
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 16.4f, imu::gyroScaleLsbPerDps(imu::GyroRange::k2000Dps));
 }
 
+// --- Device identity --------------------------------------------------------
+
+void test_who_am_i_accepts_the_genuine_part(void) {
+  TEST_ASSERT_TRUE(imu::isCompatibleWhoAmI(imu::kWhoAmIValue));
+}
+
+void test_who_am_i_accepts_the_substituted_parts(void) {
+  // Modules sold as GY-521 boards routinely carry one of these instead. They
+  // share the register map and the scale factors, so the driver must not
+  // refuse them.
+  TEST_ASSERT_TRUE(imu::isCompatibleWhoAmI(0x70));
+  TEST_ASSERT_TRUE(imu::isCompatibleWhoAmI(0x71));
+  TEST_ASSERT_TRUE(imu::isCompatibleWhoAmI(0x72));
+  TEST_ASSERT_TRUE(imu::isCompatibleWhoAmI(0x73));
+}
+
+void test_who_am_i_still_rejects_an_unrelated_device(void) {
+  // The check exists to catch a read that landed somewhere else entirely, so
+  // it has to keep saying no to values outside the family.
+  TEST_ASSERT_FALSE(imu::isCompatibleWhoAmI(0x00));
+  TEST_ASSERT_FALSE(imu::isCompatibleWhoAmI(0xFF));
+  TEST_ASSERT_FALSE(imu::isCompatibleWhoAmI(0x1A));
+  TEST_ASSERT_FALSE(imu::isCompatibleWhoAmI(0xD0));
+}
+
 // --- Sample rate ------------------------------------------------------------
 
 void test_sample_rate_divider_with_the_filter_enabled(void) {
@@ -322,6 +347,10 @@ int main(int, char**) {
 
   RUN_TEST(test_accelerometer_scale_factors);
   RUN_TEST(test_gyroscope_scale_factors);
+
+  RUN_TEST(test_who_am_i_accepts_the_genuine_part);
+  RUN_TEST(test_who_am_i_accepts_the_substituted_parts);
+  RUN_TEST(test_who_am_i_still_rejects_an_unrelated_device);
 
   RUN_TEST(test_sample_rate_divider_with_the_filter_enabled);
   RUN_TEST(test_sample_rate_divider_with_the_filter_bypassed);

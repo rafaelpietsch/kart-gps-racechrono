@@ -28,8 +28,9 @@ public:
   explicit Mpu6050(TwoWire& wire) : wire_(wire) {}
 
   /// Probes WHO_AM_I, wakes the device and applies the configuration.
-  /// Returns false when the sensor does not answer or identifies as something
-  /// else, which is almost always a wiring or address problem.
+  /// Returns false when the sensor does not answer, or when it identifies as
+  /// something outside the MPU-6050 compatible family -- the first is almost
+  /// always a wiring or address problem, the second a substituted part.
   bool begin(const Config& config);
 
   /// Reads one 14 byte burst. Returns false on an I2C error.
@@ -42,12 +43,17 @@ public:
   const Config& config() const { return config_; }
   uint32_t errorCount() const { return errorCount_; }
 
+  /// The identity byte read by the last begin(), whether or not it was
+  /// accepted. 0 when the read itself failed.
+  uint8_t whoAmI() const { return whoAmI_; }
+
 private:
   bool writeRegister(uint8_t reg, uint8_t value);
   bool readRegisters(uint8_t reg, uint8_t* buffer, size_t length);
 
   TwoWire& wire_;
   Config config_;
+  uint8_t whoAmI_ = 0;
   uint32_t errorCount_ = 0;
 };
 
