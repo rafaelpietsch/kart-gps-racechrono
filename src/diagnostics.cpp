@@ -126,7 +126,8 @@ bool readRegisters(TwoWire& wire, uint8_t address, uint8_t reg, uint8_t* buffer,
   return true;
 }
 
-void dumpMpuRegisters(TwoWire& wire, uint8_t address, Print& out) {
+void dumpMpuRegisters(TwoWire& wire, uint8_t address, Print& out,
+                      const imu::RawAccelBias& trim) {
   out.print("[i2c] MPU-6050 register dump at ");
   printHexByte(address, out);
   out.println();
@@ -176,7 +177,7 @@ void dumpMpuRegisters(TwoWire& wire, uint8_t address, Print& out) {
   // the ranges the driver configures rather than at whatever it currently holds.
   const telemetry::ImuSample sample =
       imu::toPhysicalUnits(raw, imu::AccelRange::k4G, imu::GyroRange::k500Dps);
-  const float gravity =
+  float gravity =
       sqrtf(sample.accelG[0] * sample.accelG[0] + sample.accelG[1] * sample.accelG[1] +
             sample.accelG[2] * sample.accelG[2]);
 
@@ -184,6 +185,22 @@ void dumpMpuRegisters(TwoWire& wire, uint8_t address, Print& out) {
              sample.accelG[2], gravity);
   out.printf("[i2c]   gyro  %.2f %.2f %.2f dps   temp %.1f C\n", sample.gyroDps[0],
              sample.gyroDps[1], sample.gyroDps[2], sample.temperatureC);
+
+  if (!trim.isZero()) {
+    // The dump bypasses the driver, so the configured trim has to be applied
+    // here or these numbers will disagree with a zeroing that just passed.
+    telemetry::ImuRawSample corrected = raw;
+    imu::applyRawAccelBias(corrected, trim);
+    const telemetry::ImuSample fixed =
+        imu::toPhysicalUnits(corrected, imu::AccelRange::k4G, imu::GyroRange::k500Dps);
+    const float fixedGravity =
+        sqrtf(fixed.accelG[0] * fixed.accelG[0] + fixed.accelG[1] * fixed.accelG[1] +
+              fixed.accelG[2] * fixed.accelG[2]);
+    out.printf("[i2c]   with the configured trim (%+d %+d %+d): %.3f %.3f %.3f g  |a|=%.3f g\n",
+               trim.count[0], trim.count[1], trim.count[2], fixed.accelG[0], fixed.accelG[1],
+               fixed.accelG[2], fixedGravity);
+    gravity = fixedGravity;
+  }
 
   if (gravity < 0.85f || gravity > 1.15f) {
     out.println("[i2c]   a device at rest should read about 1.000 g in total. "

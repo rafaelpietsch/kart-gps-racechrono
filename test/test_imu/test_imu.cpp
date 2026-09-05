@@ -56,6 +56,161 @@ void test_gyroscope_scale_factors(void) {
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 16.4f, imu::gyroScaleLsbPerDps(imu::GyroRange::k2000Dps));
 }
 
+// --- Factory trim correction ------------------------------------------------
+
+void test_raw_bias_is_subtracted_from_every_axis(void) {
+  telemetry::ImuRawSample sample;
+  sample.accel[0] = 1754;
+  sample.accel[1] = 4416;
+  sample.accel[2] = -2084;
+
+  imu::RawAccelBias bias;
+  bias.count[0] = -6344;
+  bias.count[1] = 5123;
+  bias.count[2] = -963;
+  imu::applyRawAccelBias(sample, bias);
+
+  TEST_ASSERT_EQUAL_INT16(8098, sample.accel[0]);
+  TEST_ASSERT_EQUAL_INT16(-707, sample.accel[1]);
+  TEST_ASSERT_EQUAL_INT16(-1121, sample.accel[2]);
+}
+
+void test_raw_bias_correction_restores_one_g(void) {
+  // The reading the bench part gives at rest comes to 0.63 g uncorrected,
+  // which the zeroing rejects. Removing the measured trim brings it back to
+  // the 1 g that a stationary device has to read.
+  telemetry::ImuRawSample sample;
+  sample.accel[0] = 1754;
+  sample.accel[1] = 4416;
+  sample.accel[2] = -2084;
+
+  imu::RawAccelBias bias;
+  bias.count[0] = -6344;
+  bias.count[1] = 5123;
+  bias.count[2] = -963;
+  imu::applyRawAccelBias(sample, bias);
+
+  const telemetry::ImuSample converted =
+      imu::toPhysicalUnits(sample, imu::AccelRange::k4G, imu::GyroRange::k500Dps);
+  const float magnitude =
+      sqrtf(converted.accelG[0] * converted.accelG[0] + converted.accelG[1] * converted.accelG[1] +
+            converted.accelG[2] * converted.accelG[2]);
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 1.0f, magnitude);
+}
+
+void test_raw_bias_saturates_instead_of_wrapping(void) {
+  // A large offset near full scale must not turn a pegged positive reading
+  // into a large negative one.
+  telemetry::ImuRawSample sample;
+  sample.accel[0] = 32000;
+  sample.accel[1] = -32000;
+  sample.accel[2] = 0;
+
+  imu::RawAccelBias bias;
+  bias.count[0] = -30000;
+  bias.count[1] = 30000;
+  imu::applyRawAccelBias(sample, bias);
+
+  TEST_ASSERT_EQUAL_INT16(32767, sample.accel[0]);
+  TEST_ASSERT_EQUAL_INT16(-32768, sample.accel[1]);
+  TEST_ASSERT_EQUAL_INT16(0, sample.accel[2]);
+}
+
+void test_a_zero_bias_changes_nothing(void) {
+  telemetry::ImuRawSample sample;
+  sample.accel[0] = 123;
+  sample.accel[1] = -456;
+  sample.accel[2] = 789;
+
+  const imu::RawAccelBias bias;
+  TEST_ASSERT_TRUE(bias.isZero());
+  imu::applyRawAccelBias(sample, bias);
+
+  TEST_ASSERT_EQUAL_INT16(123, sample.accel[0]);
+  TEST_ASSERT_EQUAL_INT16(-456, sample.accel[1]);
+  TEST_ASSERT_EQUAL_INT16(789, sample.accel[2]);
+}
+
+// --- Accelerometer characterisation -----------------------------------------
+
+/// Feeds one attitude to the characteriser long enough to clear the settle
+/// window, the way resting the board on a face does.
+void holdAt(imu::AccelCharacterizer& characterizer, int16_t x, int16_t y, int16_t z) {
+  telemetry::ImuRawSample raw;
+  raw.accel[0] = x;
+  raw.accel[1] = y;
+  raw.accel[2] = z;
+  for (int i = 0; i < imu::AccelCharacterizer::kSettleSamples + 5; ++i) {
+    characterizer.addSample(raw);
+  }
+}
+
+/// Walks the six faces of a part whose axes carry `offset` counts of bias and
+/// respond with `sensitivity` counts per g.
+void tumbleThroughSixFaces(imu::AccelCharacterizer& characterizer, int16_t sensitivity,
+                           int16_t offset) {
+  holdAt(characterizer, static_cast<int16_t>(sensitivity + offset), offset, offset);
+  holdAt(characterizer, static_cast<int16_t>(-sensitivity + offset), offset, offset);
+  holdAt(characterizer, offset, static_cast<int16_t>(sensitivity + offset), offset);
+  holdAt(characterizer, offset, static_cast<int16_t>(-sensitivity + offset), offset);
+  holdAt(characterizer, offset, offset, static_cast<int16_t>(sensitivity + offset));
+  holdAt(characterizer, offset, offset, static_cast<int16_t>(-sensitivity + offset));
+}
+
+void test_characteriser_recovers_sensitivity_and_offset(void) {
+  imu::AccelCharacterizer characterizer;
+  characterizer.reset();
+  tumbleThroughSixFaces(characterizer, 8192, 0);
+
+  TEST_ASSERT_TRUE(characterizer.isComplete());
+  for (size_t axis = 0; axis < 3; ++axis) {
+    const imu::AccelAxisFit fit = characterizer.axis(axis);
+    TEST_ASSERT_TRUE(fit.complete);
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 8192.0f, fit.sensitivityLsbPerG);
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 0.0f, fit.offsetCount);
+  }
+}
+
+void test_characteriser_separates_a_bias_from_a_scale_error(void) {
+  // The part on the bench reads low and its magnitude changes with attitude,
+  // which is what a bias does and a pure scale error cannot.
+  imu::AccelCharacterizer characterizer;
+  characterizer.reset();
+  tumbleThroughSixFaces(characterizer, 5200, 900);
+
+  TEST_ASSERT_TRUE(characterizer.isComplete());
+  for (size_t axis = 0; axis < 3; ++axis) {
+    const imu::AccelAxisFit fit = characterizer.axis(axis);
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 5200.0f, fit.sensitivityLsbPerG);
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 900.0f, fit.offsetCount);
+  }
+}
+
+void test_characteriser_is_incomplete_from_a_single_attitude(void) {
+  imu::AccelCharacterizer characterizer;
+  characterizer.reset();
+  holdAt(characterizer, 1754, 4416, -2084);
+
+  TEST_ASSERT_FALSE(characterizer.isComplete());
+  TEST_ASSERT_FALSE(characterizer.axis(0).complete);
+}
+
+void test_characteriser_ignores_samples_taken_while_moving(void) {
+  imu::AccelCharacterizer characterizer;
+  characterizer.reset();
+
+  // A swing between two faces must not be mistaken for either of them.
+  const int step = imu::AccelCharacterizer::kStillDeltaCounts + 50;
+  telemetry::ImuRawSample raw;
+  for (int i = 0; i < 100; ++i) {
+    raw.accel[0] = static_cast<int16_t>(i * step);
+    raw.accel[1] = 0;
+    raw.accel[2] = 0;
+    TEST_ASSERT_FALSE(characterizer.addSample(raw));
+  }
+  TEST_ASSERT_EQUAL_UINT32(0, characterizer.acceptedSamples());
+}
+
 // --- Device identity --------------------------------------------------------
 
 void test_who_am_i_accepts_the_genuine_part(void) {
@@ -347,6 +502,16 @@ int main(int, char**) {
 
   RUN_TEST(test_accelerometer_scale_factors);
   RUN_TEST(test_gyroscope_scale_factors);
+
+  RUN_TEST(test_raw_bias_is_subtracted_from_every_axis);
+  RUN_TEST(test_raw_bias_correction_restores_one_g);
+  RUN_TEST(test_raw_bias_saturates_instead_of_wrapping);
+  RUN_TEST(test_a_zero_bias_changes_nothing);
+
+  RUN_TEST(test_characteriser_recovers_sensitivity_and_offset);
+  RUN_TEST(test_characteriser_separates_a_bias_from_a_scale_error);
+  RUN_TEST(test_characteriser_is_incomplete_from_a_single_attitude);
+  RUN_TEST(test_characteriser_ignores_samples_taken_while_moving);
 
   RUN_TEST(test_who_am_i_accepts_the_genuine_part);
   RUN_TEST(test_who_am_i_accepts_the_substituted_parts);

@@ -51,7 +51,22 @@ kart::TelemetryPipeline::Config makePipelineConfig() {
 kart::TelemetryPipeline pipeline(bleServer, makePipelineConfig());
 imu::MotionProcessor motionProcessor;
 imu::BiasCalibrator calibrator;
+imu::AccelCharacterizer characterizer;
 kart::ButtonDebouncer setButton;
+
+imu::RawAccelBias makeRawAccelBias() {
+  imu::RawAccelBias bias;
+  bias.count[0] = KARTGPS_ACCEL_OFFSET_X;
+  bias.count[1] = KARTGPS_ACCEL_OFFSET_Y;
+  bias.count[2] = KARTGPS_ACCEL_OFFSET_Z;
+  return bias;
+}
+
+const imu::RawAccelBias rawAccelBias = makeRawAccelBias();
+
+/// Set by the console 'c' command while a six position capture is running.
+bool characterizing = false;
+uint32_t lastCharacterizeLogMs = 0;
 
 bool imuPresent = false;
 uint32_t lastImuSampleMs = 0;
@@ -192,9 +207,16 @@ void serviceImu(uint32_t nowMs) {
   if (!mpu.read(raw, nowMs)) {
     return;
   }
+  // Before anything else looks at the sample, including the characteriser and
+  // the 1 g check inside the zeroing.
+  imu::applyRawAccelBias(raw, rawAccelBias);
   const telemetry::ImuSample sample =
       imu::toPhysicalUnits(raw, mpu.config().accelRange, mpu.config().gyroRange);
   pipeline.setDeviceTemperature(sample.temperatureC);
+
+  if (characterizing) {
+    characterizer.addSample(raw);
+  }
 
   if (calibrator.isRunning()) {
     // While the window is open the samples belong to the calibrator, not to
@@ -293,6 +315,9 @@ void printStatus(uint32_t nowMs) {
     }
   }
 
+  Serial.printf("[imu ] accel trim correction: %+d %+d %+d counts%s\n", rawAccelBias.count[0],
+                rawAccelBias.count[1], rawAccelBias.count[2],
+                rawAccelBias.isZero() ? " (none configured)" : "");
   Serial.printf("[imu ] present=%s i2cErrors=%lu calibrator=%s (%u/%u) biasApplied=%s\n",
                 imuPresent ? "yes" : "NO", static_cast<unsigned long>(mpu.errorCount()),
                 calibratorStateName(), static_cast<unsigned>(calibrator.collected()),
@@ -351,13 +376,13 @@ void runI2cDiagnostics() {
   const diag::I2cScanResult scan = diag::scanI2c(Wire, Serial);
   for (uint8_t i = 0; i < scan.foundCount; ++i) {
     if (scan.found[i] == imu::kI2cAddressLow || scan.found[i] == imu::kI2cAddressHigh) {
-      diag::dumpMpuRegisters(Wire, scan.found[i], Serial);
+      diag::dumpMpuRegisters(Wire, scan.found[i], Serial, rawAccelBias);
     }
   }
   if (scan.foundCount == 0) {
     // Dump anyway: the per-register error codes from a silent address say more
     // than the scan summary does.
-    diag::dumpMpuRegisters(Wire, KARTGPS_MPU_ADDRESS, Serial);
+    diag::dumpMpuRegisters(Wire, KARTGPS_MPU_ADDRESS, Serial, rawAccelBias);
   }
 }
 
@@ -372,15 +397,75 @@ void retryImu(uint32_t nowMs) {
   }
 }
 
+void printCharacterization() {
+  const float nominal = imu::accelScaleLsbPerG(mpu.config().accelRange);
+  Serial.printf("\n--- accelerometer characterisation, %lu samples ---\n",
+                static_cast<unsigned long>(characterizer.acceptedSamples()));
+  Serial.printf("[cal ] nominal sensitivity for this range: %.0f counts/g\n", nominal);
+
+  static const char* kAxisNames[3] = {"X", "Y", "Z"};
+  for (size_t i = 0; i < 3; ++i) {
+    const imu::AccelAxisFit fit = characterizer.axis(i);
+    // Counts alone do not say what to do next. Stating the extremes in g on the
+    // nominal scale does: an axis that never went near -1 g or +1 g has a face
+    // that was never rested on.
+    Serial.printf("[cal ] %s: reached %+.2f g .. %+.2f g%s\n", kAxisNames[i],
+                  static_cast<float>(fit.minCount) / nominal,
+                  static_cast<float>(fit.maxCount) / nominal,
+                  fit.complete ? "" : "   <- needs both faces of this axis");
+    if (!fit.complete) {
+      continue;
+    }
+    Serial.printf("[cal ]    offset %+.0f counts (%+.3f g)   sensitivity %.0f counts/g "
+                  "(%.0f%% of nominal)\n",
+                  fit.offsetCount, fit.offsetCount / nominal, fit.sensitivityLsbPerG,
+                  100.0f * fit.sensitivityLsbPerG / nominal);
+  }
+
+  if (!characterizer.isComplete()) {
+    Serial.println("[cal ] rest the board on each of its six faces, a couple of "
+                   "seconds each, then press 'c' again.");
+    return;
+  }
+  Serial.println("[cal ] all six faces seen.");
+  Serial.println("[cal ] Sensitivities near 100% mean the scale is right and the part is "
+                 "usable; what is left is trim error. Add these to platformio.ini and "
+                 "reflash, then press 'z' to zero:");
+  Serial.printf("[cal ]     -DKARTGPS_ACCEL_OFFSET_X=%ld\n",
+                static_cast<long>(characterizer.axis(0).offsetCount) + KARTGPS_ACCEL_OFFSET_X);
+  Serial.printf("[cal ]     -DKARTGPS_ACCEL_OFFSET_Y=%ld\n",
+                static_cast<long>(characterizer.axis(1).offsetCount) + KARTGPS_ACCEL_OFFSET_Y);
+  Serial.printf("[cal ]     -DKARTGPS_ACCEL_OFFSET_Z=%ld\n",
+                static_cast<long>(characterizer.axis(2).offsetCount) + KARTGPS_ACCEL_OFFSET_Z);
+  Serial.println("[cal ] A sensitivity far from 100% on any axis is a different fault: "
+                 "the part does not match the datasheet scale and no offset fixes that.");
+}
+
 void printConsoleHelp() {
   Serial.println("\n--- kart-gps console ---");
   Serial.println("  s  status: what the LED means right now, plus every counter");
   Serial.println("  b  replay the boot report (lost when the monitor attaches late)");
   Serial.println("  i  I2C bus lines, address scan and MPU-6050 register dump");
   Serial.println("  n  toggle the raw GPS UART echo");
+  Serial.println("  c  six position accelerometer characterisation (start/report)");
   Serial.println("  z  re-run the zeroing (hold the board still)");
   Serial.println("  r  re-probe the MPU-6050 over I2C");
   Serial.println("  ?  this help");
+}
+
+void serviceCharacterizationProgress(uint32_t nowMs) {
+  if (!characterizing || static_cast<uint32_t>(nowMs - lastCharacterizeLogMs) < 3000) {
+    return;
+  }
+  lastCharacterizeLogMs = nowMs;
+  const imu::AccelAxisFit x = characterizer.axis(0);
+  const imu::AccelAxisFit y = characterizer.axis(1);
+  const imu::AccelAxisFit z = characterizer.axis(2);
+  const float nominal = imu::accelScaleLsbPerG(mpu.config().accelRange);
+  Serial.printf("[cal ] X %+.2f..%+.2f%s  Y %+.2f..%+.2f%s  Z %+.2f..%+.2f%s (g)\n",
+                x.minCount / nominal, x.maxCount / nominal, x.complete ? " ok" : "",
+                y.minCount / nominal, y.maxCount / nominal, y.complete ? " ok" : "",
+                z.minCount / nominal, z.maxCount / nominal, z.complete ? " ok" : "");
 }
 
 void serviceConsole(uint32_t nowMs) {
@@ -406,6 +491,21 @@ void serviceConsole(uint32_t nowMs) {
         } else {
           Serial.println("\n[gps ] raw echo on: printable bytes as text, the rest as <XX>");
           gpsReceiver.setRawEcho(&Serial);
+        }
+        break;
+      case 'c':
+      case 'C':
+        if (characterizing) {
+          characterizing = false;
+          printCharacterization();
+        } else if (!imuPresent) {
+          Serial.println("\n[cal ] no sensor to characterise");
+        } else {
+          characterizer.reset();
+          characterizing = true;
+          lastCharacterizeLogMs = nowMs;
+          Serial.println("\n[cal ] capturing. Rest the board on each of its six faces "
+                         "in turn, a couple of seconds each, then press 'c' to finish.");
         }
         break;
       case 'z':
@@ -537,6 +637,7 @@ void loop() {
   pipeline.tick(now);
   updateStatusLed(currentPattern(now), now);
 #if KARTGPS_ENABLE_CONSOLE
+  serviceCharacterizationProgress(now);
   serviceConsole(now);
 #endif
 #if KARTGPS_LOG_LEVEL > 1
