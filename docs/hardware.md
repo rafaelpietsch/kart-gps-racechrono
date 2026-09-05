@@ -158,6 +158,7 @@ Open the monitor and press a key:
 | `i` | I2C: idle line levels, an address scan, and an MPU-6050 register dump |
 | `n` | Toggles a raw echo of the GPS UART |
 | `c` | Six position accelerometer characterisation (start, then report) |
+| `g` | GPS link test: both pin levels, edge counts and a baud sweep |
 | `z` | Re-runs the zeroing |
 | `r` | Re-probes the MPU-6050 without a reboot |
 | `?` | Help |
@@ -234,6 +235,35 @@ Samples are only taken while the reading is steady, judged from the
 accelerometer itself rather than from the gyroscope: a part with a large rate
 bias never reads zero at rest, so gating on gyro magnitude would reject
 everything.
+
+### When the GPS sends nothing
+
+`rxBytes` stuck at zero is not a parsing fault and not a baud rate fault. A
+wrong rate delivers plenty of bytes and plenty of checksum errors; silence means
+nothing is arriving at all, which is electrical.
+
+`g` tests both pins as plain inputs before any UART is involved. Each is held
+down by an internal pull-down: a powered receiver idles its TX high and
+overpowers that, so a line still reading low has nothing driving it. Counting
+edges then separates a connected-but-idle line from a talking one.
+
+Both pins are tested rather than only the receive one, because "nothing is
+driving my RX" has two causes and they need opposite fixes:
+
+- **Neither pin driven.** The module has no 3V3, its GND is not shared with the
+  board, or neither wire reaches these pins.
+- **Only the transmit pin driven.** The pair is wired the wrong way round. The
+  module's TX is landing on GPIO21 and its RX on GPIO20.
+
+Swap the wires rather than swapping `KARTGPS_PIN_GPS_RX` and
+`KARTGPS_PIN_GPS_TX` in the build. GPIO21 is the ESP32-C3's `U0TXD`, which the
+ROM bootloader drives as an output on every reset, before any application code
+runs. A receiver's TX sitting on that pin is two outputs fighting each time the
+board comes up; moving the wire ends that, reconfiguring the firmware does not.
+
+Once the line test passes, the baud sweep says which rate the receiver is
+actually using. Note that it blocks for several seconds and will drop a live
+BLE session.
 
 ### Reading a raw UART echo
 
