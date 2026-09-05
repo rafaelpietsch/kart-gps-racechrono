@@ -1,0 +1,199 @@
+// SPDX-License-Identifier: MIT
+
+#include "diagnostics.h"
+
+#include <math.h>
+
+#include "imu.h"
+
+namespace diag {
+namespace {
+
+/// Registers worth seeing when the sensor is not behaving. Anything that is
+/// written during begin() is here, so a mismatch between what we asked for and
+/// what the device holds is visible at a glance.
+struct NamedRegister {
+  uint8_t address;
+  const char* name;
+};
+
+constexpr NamedRegister kMpuRegisters[] = {
+    {imu::reg::kWhoAmI, "WHO_AM_I"},
+    {imu::reg::kPowerManagement1, "PWR_MGMT_1"},
+    {imu::reg::kSampleRateDivider, "SMPRT_DIV"},
+    {imu::reg::kConfig, "CONFIG"},
+    {imu::reg::kGyroConfig, "GYRO_CONFIG"},
+    {imu::reg::kAccelConfig, "ACCEL_CONFIG"},
+    {imu::reg::kIntEnable, "INT_ENABLE"},
+    {imu::reg::kIntStatus, "INT_STATUS"},
+};
+
+void printHexByte(uint8_t value, Print& out) {
+  out.print("0x");
+  if (value < 0x10) {
+    out.print('0');
+  }
+  out.print(value, HEX);
+}
+
+} // namespace
+
+const char* wireErrorName(uint8_t code) {
+  switch (code) {
+    case 0:
+      return "ok";
+    case 1:
+      return "data too long";
+    case 2:
+      return "NACK on address (nothing there)";
+    case 3:
+      return "NACK on data";
+    case 4:
+      return "other error";
+    case 5:
+      return "timeout (bus held low?)";
+    default:
+      return "unknown";
+  }
+}
+
+void reportBusLines(int sdaPin, int sclPin, Print& out) {
+  // The I2C pads keep their input path enabled while the peripheral drives
+  // them, so the GPIO input register still reflects the real pad level.
+  const bool sdaHigh = digitalRead(sdaPin) == HIGH;
+  const bool sclHigh = digitalRead(sclPin) == HIGH;
+
+  out.printf("[i2c] idle levels: SDA(GPIO%d)=%s SCL(GPIO%d)=%s\n", sdaPin, sdaHigh ? "HIGH" : "LOW",
+             sclPin, sclHigh ? "HIGH" : "LOW");
+  if (!sdaHigh || !sclHigh) {
+    out.println("[i2c] a line stuck LOW means no pull-up, a short to ground, or a "
+                "device holding the bus. Nothing will be found until that clears.");
+  }
+}
+
+I2cScanResult scanI2c(TwoWire& wire, Print& out) {
+  I2cScanResult result;
+  out.println("[i2c] scanning 0x08..0x77");
+
+  for (uint8_t address = 0x08; address <= 0x77; ++address) {
+    wire.beginTransmission(address);
+    const uint8_t error = wire.endTransmission();
+    if (error == 0) {
+      out.print("[i2c]   found device at ");
+      printHexByte(address, out);
+      if (address == imu::kI2cAddressLow) {
+        out.print("  (MPU-6050, AD0 low)");
+      } else if (address == imu::kI2cAddressHigh) {
+        out.print("  (MPU-6050, AD0 high)");
+      }
+      out.println();
+      if (result.foundCount < I2cScanResult::kMaxFound) {
+        result.found[result.foundCount++] = address;
+      }
+    } else if (error != 2) {
+      ++result.busErrors;
+    }
+  }
+
+  out.printf("[i2c] scan done: %u device(s), %u non-NACK bus errors\n",
+             static_cast<unsigned>(result.foundCount), static_cast<unsigned>(result.busErrors));
+  if (result.foundCount == 0 && result.busErrors == 0) {
+    out.println("[i2c] every address NACKed cleanly: the bus works, but nothing "
+                "is answering. Check VCC/GND on the sensor and the SDA/SCL pair.");
+  } else if (result.busErrors > 0) {
+    out.println("[i2c] bus errors on most addresses point at the wiring, not at "
+                "the sensor: swapped SDA/SCL, or a line that never releases.");
+  }
+  return result;
+}
+
+bool readRegisters(TwoWire& wire, uint8_t address, uint8_t reg, uint8_t* buffer, size_t length,
+                   uint8_t& errorOut) {
+  wire.beginTransmission(address);
+  wire.write(reg);
+  errorOut = wire.endTransmission(false);
+  if (errorOut != 0) {
+    return false;
+  }
+  const size_t received = wire.requestFrom(address, static_cast<uint8_t>(length));
+  if (received != length) {
+    errorOut = 4;
+    return false;
+  }
+  for (size_t i = 0; i < length; ++i) {
+    buffer[i] = static_cast<uint8_t>(wire.read());
+  }
+  return true;
+}
+
+void dumpMpuRegisters(TwoWire& wire, uint8_t address, Print& out) {
+  out.print("[i2c] MPU-6050 register dump at ");
+  printHexByte(address, out);
+  out.println();
+
+  for (const NamedRegister& entry : kMpuRegisters) {
+    uint8_t value = 0;
+    uint8_t error = 0;
+    if (!readRegisters(wire, address, entry.address, &value, 1, error)) {
+      out.printf("[i2c]   %-13s read failed: %s\n", entry.name, wireErrorName(error));
+      continue;
+    }
+    out.printf("[i2c]   %-13s (0x%02X) = 0x%02X\n", entry.name, entry.address, value);
+    if (entry.address == imu::reg::kWhoAmI && value != imu::kWhoAmIValue) {
+      out.printf("[i2c]   WHO_AM_I should be 0x%02X. A different value is usually a "
+                 "clone chip or a read landing on the wrong device.\n",
+                 imu::kWhoAmIValue);
+    }
+    if (entry.address == imu::reg::kPowerManagement1 && (value & 0x40) != 0) {
+      out.println("[i2c]   SLEEP bit is set: the sensor is asleep and its output "
+                  "registers will not update.");
+    }
+  }
+
+  uint8_t burst[imu::kBurstLength];
+  uint8_t error = 0;
+  if (!readRegisters(wire, address, imu::reg::kAccelXoutH, burst, sizeof(burst), error)) {
+    out.printf("[i2c]   burst read failed: %s\n", wireErrorName(error));
+    return;
+  }
+
+  out.print("[i2c]   burst 0x3B..0x48 =");
+  for (uint8_t byte : burst) {
+    out.print(' ');
+    if (byte < 0x10) {
+      out.print('0');
+    }
+    out.print(byte, HEX);
+  }
+  out.println();
+
+  telemetry::ImuRawSample raw;
+  if (!imu::decodeBurst(burst, sizeof(burst), raw)) {
+    out.println("[i2c]   burst did not decode");
+    return;
+  }
+  // The dump is read straight off the wire, so it is deliberately reported at
+  // the ranges the driver configures rather than at whatever it currently holds.
+  const telemetry::ImuSample sample =
+      imu::toPhysicalUnits(raw, imu::AccelRange::k4G, imu::GyroRange::k500Dps);
+  const float gravity =
+      sqrtf(sample.accelG[0] * sample.accelG[0] + sample.accelG[1] * sample.accelG[1] +
+            sample.accelG[2] * sample.accelG[2]);
+
+  out.printf("[i2c]   accel %.3f %.3f %.3f g  |a|=%.3f g\n", sample.accelG[0], sample.accelG[1],
+             sample.accelG[2], gravity);
+  out.printf("[i2c]   gyro  %.2f %.2f %.2f dps   temp %.1f C\n", sample.gyroDps[0],
+             sample.gyroDps[1], sample.gyroDps[2], sample.temperatureC);
+
+  if (gravity < 0.85f || gravity > 1.15f) {
+    out.println("[i2c]   a device at rest should read about 1.000 g in total. "
+                "This is outside the window the zeroing accepts.");
+  }
+  const bool allZero = raw.accel[0] == 0 && raw.accel[1] == 0 && raw.accel[2] == 0;
+  if (allZero) {
+    out.println("[i2c]   every accel axis reads exactly zero: the sensor is "
+                "answering but not converting (asleep, or held in reset).");
+  }
+}
+
+} // namespace diag

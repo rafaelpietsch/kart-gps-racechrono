@@ -61,6 +61,13 @@
 
 // --- IMU --------------------------------------------------------------------
 
+/// I2C address of the MPU-6050. The GY-521 ties AD0 low, giving 0x68; some
+/// breakouts tie it high instead, giving 0x69. The console 'i' command reports
+/// which address actually answers.
+#ifndef KARTGPS_MPU_ADDRESS
+#define KARTGPS_MPU_ADDRESS 0x68
+#endif
+
 /// How often the MPU-6050 is read. Sampling above the publish rate lets the
 /// low pass filter do its job and keeps aliasing off the g-g diagram.
 #ifndef KARTGPS_IMU_SAMPLE_HZ
@@ -125,6 +132,22 @@
 /// 0 silent, 1 errors and lifecycle, 2 verbose, 4 everything.
 #ifndef KARTGPS_LOG_LEVEL
 #define KARTGPS_LOG_LEVEL 1
+#endif
+
+// --- Diagnostics ------------------------------------------------------------
+
+/// A one-key console on the USB serial port: bus scans, register dumps and a
+/// raw UART echo, on demand. It costs a Serial.available() per loop, so it is
+/// on wherever logging is, including the release build -- the boot log is the
+/// one thing you cannot go back and ask for, and this is how you ask.
+#ifndef KARTGPS_ENABLE_CONSOLE
+#define KARTGPS_ENABLE_CONSOLE (KARTGPS_LOG_LEVEL > 0)
+#endif
+
+/// Echo raw GPS UART bytes to the console from boot. The console 'n' key
+/// toggles it at runtime, so this only sets the starting state.
+#ifndef KARTGPS_ENABLE_NMEA_ECHO
+#define KARTGPS_ENABLE_NMEA_ECHO 0
 #endif
 
 #endif // KARTGPS_CONFIG_H
